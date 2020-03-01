@@ -1,0 +1,201 @@
+---
+title: "clt_only_script"
+output: html_document
+---
+
+#Charlottesville
+
+
+#Load the data from the csv file
+```{r}
+data_charlottesville = read.csv2(file="clt_solidarity_only_eliza.csv",header=TRUE,sep=",",encoding="UTF-8")
+# data_charlottesville = read.csv2(file="merged_data.csv", sep=",", encoding="UTF-8")
+```
+
+```{r}
+head(data_charlottesville)
+```
+
+```{r}
+#rm(new_data)
+library(dplyr)
+new_data <- data_charlottesville %>% dplyr::mutate(text=iconv(body, from = "latin1", to = "ascii", sub = "byte"))
+```
+
+
+```{r}
+head(new_data)
+```
+
+
+```{r}
+text <- as.data.frame(unique(new_data$text))
+names(text)[1]<-"orig_tweets"
+```
+
+```{r}
+library(Unicode)
+library(rvest)
+library(ggplot2)
+```
+
+
+```{r}
+emDict_raw <- read.csv2("emDict.csv") %>% 
+      select(EN, utf8, unicode) %>% 
+      dplyr::rename(description = EN, r_encoding = utf8)
+
+skin_tones <- c("light skin tone", 
+                "medium-light skin tone", 
+                "medium skin tone",
+                "medium-dark skin tone", 
+                "dark skin tone")
+
+# remove plain skin tones and remove skin tone info in description
+emDict <- emDict_raw %>%
+  # remove plain skin tones emojis
+  filter(!description %in% skin_tones) %>%
+  # remove emojis with skin tones info, e.g. remove woman: light skin tone and only
+  # keep woman
+  filter(!grepl(":", description)) %>%
+  mutate(description = tolower(description)) %>%
+  mutate(unicode = as.u_char(as.numeric(unicode)))
+```
+
+```{r}
+url <- "http://kt.ijs.si/data/Emoji_sentiment_ranking/index.html"
+emojis_raw <- url %>%
+  read_html() %>%
+  html_table() %>%
+  data.frame %>%
+  dplyr::select(-Image.twemoji., -Sentiment.bar.c.i..95..)
+names(emojis_raw) <- c("char", "unicode", "occurrences", "position", "negative", "neutral", "positive", "sentiment_score", "description", "block")
+emojis_raw[emojis_raw$description=="red heart",]
+```
+
+```{r}
+emojis <- emojis_raw %>%
+  dplyr::mutate(unicode = as.u_char(unicode)) %>%
+  dplyr::mutate(description = tolower(description)) 
+emojis_merged <- emojis %>%
+  merge(emDict, by = "unicode")
+new_matchto <- emojis_merged$r_encoding
+new_description <- emojis_merged$description.y
+sentiment <- emojis_merged$sentiment_score
+neutral <- emojis_merged$neutral
+```
+
+
+```{r}
+# emojis_merged = read.csv2(file="emojis_merged.csv",encoding="UTF-8")
+# new_matchto <- emojis_merged$r_encoding
+# new_description <- emojis_merged$description.y
+# sentiment <- emojis_merged$sentiment_score
+# neutral <- emojis_merged$neutral
+# emDict <- read.csv2(file='emDict_final.csv',encoding="UTF-8")
+
+```
+
+
+
+```{r}
+library("parallel")
+library("stringr")
+count_matches <- function(string, matchto, description, sentiment = NA, neutral= NA) {
+  
+  vec <- str_count(string, matchto)
+  matches <- which(vec != 0)
+  
+  descr <- NA
+  cnt <- NA
+  mnt<- NA
+  
+  if (length(matches) != 0) {
+    
+    descr <- description[matches]
+    cnt <- vec[matches]
+    
+  } 
+  
+  df <- data.frame(text = string,description = descr, count = cnt, sentiment = NA, neutral= NA)
+  
+  if (!is.na(sentiment) & length(sentiment[matches]) != 0) {
+    
+    df$sentiment <- sentiment[matches]
+    df$neutral <- neutral[matches]
+  }
+  
+  return(df)
+  
+}
+```
+
+```{r}
+parallel_match<- function(texts, matchto, description, sentiment = NA, neutral = NA, mc.cores = 2) {
+  emojis_matching <- function(txt,matchto, description, sentiment,neutral) 
+  {
+    txt %>% lapply(count_matches, matchto = matchto, description = description, sentiment = sentiment,neutral=neutral) %>%
+    bind_rows()
+  }
+  mclapply(X = texts,FUN = emojis_matching, matchto, description, sentiment,neutral, mc.cores = mc.cores) %>%
+  bind_rows()
+
+}
+```
+
+```{r}
+sentiments_raw_score <- parallel_match(text$orig_tweets, new_matchto, new_description,sentiment,neutral)
+sentiments_raw_score <- sentiments_raw_score%>%filter(!is.na(count))%>%mutate(sentiment = as.numeric(sentiment),neutral=as.numeric(neutral))
+```
+
+
+```{r}
+sent_arrange1<- group_by(sentiments_raw_score,description)%>%dplyr::summarise(count=sum(count),sentiment_score=max(sentiment),neutral=max(neutral))%>% arrange(-count)
+sent_arrange1<-merge(sent_arrange1,emDict, by.x = "description", by.y = "description")%>% arrange(-count)
+head(sent_arrange1)
+```
+
+
+```{r}
+conv_unicode = as.character(parse(text=shQuote(gsub("U\\+([A-Z0-9]+)", "\\\\U\\1", sent_arrange1$unicode))))
+conv_unicode = gsub("[[:space:]]", "", conv_unicode)
+conv_unicode
+```
+
+
+```{r}
+conv_unicode = gsub("\u2764", "\u2764\ufe0f", conv_unicode) 
+conv_unicode
+```
+
+```{r}
+library(emojifont)
+library(ggplot2)
+library(gridSVG)
+load.emojifont("OpenSansEmoji.ttf")
+list.emojifonts()
+quartz()
+
+ggplot(sent_arrange1, aes(x=sentiment_score,y=neutral,size=factor(count),show.legend=F))
++theme_classic()+geom_line(data = data.frame(x = seq(-1,+1,length.out=150), y = c(rep(0,1))), aes(x=x, y=y, color=x),size=2)
++xlim(-1, +1)+ylim(-0.0,+1)+
+  scale_colour_gradientn( colours = c( "darkred", "yellow", "darkgreen"),breaks  = c(-1, 0.1, 1),labels  = c( "negative", "neutral", "positive"),
+                          limits  = c(-1,1)) 
++guides( size = FALSE, colour = guide_legend(title="Emotions", reverse = TRUE,override.aes = list(size=5)))
++geom_text(aes(label=c(conv_unicode)), show.legend=F)
++theme(text = element_text(size=14),axis.text.x = element_text( size=15,hjust=0.5),axis.text.y = element_text( size=15,hjust=0.5),plot.title = element_text(size=15,face="bold",hjust = 0.5),legend.position="none")
++ggtitle("Charlottesville")+labs(x ="Sentiment Score", y = "Neutrality",xlab= "Big font", ylab = "Big font", cex.lab = 5,cex.axis=10)
+
+gs = grid.export("charlottesville_emoji_sentiment_map.svg", addClass=T)
+```
+
+```{r}
+leg<-plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+legend("bottomright", legend =c( "negative", "neutral", "positive"), pch=16, pt.cex=3, cex=1.5, bty='n',
+    col =  c( "darkred", "yellow", "darkgreen"))
+mtext("Emotions",at=0.76, cex=2)
+```
+```{r}
+library(ggpubr)
+as_ggplot(leg)
+```
